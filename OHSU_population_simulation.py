@@ -141,7 +141,7 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight,TDIR, bas
         xmPlant = np.matmul(Ap, xmPlant) + Bp * uTotal + Dp + (
             mealVectorPlant) * ((UgPlant) + UrPlant) * Ts  # in mmol/kg
 
-        yPlant = float(np.matmul(Cp, xmPlant) * 18 / modParams[1])
+        yPlant = float(np.squeeze(np.matmul(Cp, xmPlant) * 18 / modParams[1]))
 
         # Generate cgm with sensor noise
         if t > 0:
@@ -300,12 +300,13 @@ def simulate_scenarios(item):
 def main():
     now = datetime.now()
     # Directory for results
-    results_dir = '/data/roquemen/datasets/JDRFProject/OHSUPOPsimulations/'
+    repo_root = Path(__file__).resolve().parent
+    results_dir = repo_root / 'simulation_results'
     for late_bolus_min in [0]:#range(5,50,5):
         for cf in [35*0.8,35,35*1.2]:
-            this_sim_results_dir = results_dir + SIM_options.SIMULATION_ID + '/' + SIM_options.SIMULATION_TYPES[SIM_options.SIMULATION_TYPE_SELECTED] + '/bolusCorrectionFactor_'+str(int(cf))+'/' #+ now.strftime("%m%d%Y_%H%M%S")
+            this_sim_results_dir = str(results_dir / SIM_options.SIMULATION_ID / SIM_options.SIMULATION_TYPES[SIM_options.SIMULATION_TYPE_SELECTED] / f'bolusCorrectionFactor_{int(cf)}') + '/'
 
-            #this_sim_results_dir = results_dir + SIM_options.SIMULATION_ID + '/' + SIM_options.SIMULATION_TYPES[SIM_options.SIMULATION_TYPE_SELECTED] + '/boluslate_'+str(late_bolus_min)+'min/' #+ now.strftime("%m%d%Y_%H%M%S")
+            #this_sim_results_dir = str(results_dir / SIM_options.SIMULATION_ID / SIM_options.SIMULATION_TYPES[SIM_options.SIMULATION_TYPE_SELECTED] / f'boluslate_{late_bolus_min}min') + '/'
             print(this_sim_results_dir)
             # creating a new directory for simulation results
             Path(this_sim_results_dir).mkdir(parents=True, exist_ok=True)
@@ -313,7 +314,7 @@ def main():
             # Setup simulation
 
             # Load virtual subjects data
-            vp_data = SIM_load_virtualpop_data.load_virtual_subjects("/data/roquemen/datasets/T1D/features/all_subject_t1dexi_pilot_06222023.pkl")
+            vp_data = SIM_load_virtualpop_data.load_virtual_subjects(str(repo_root / "all_subject_t1dexi_pilot_06222023.pkl"))
 
             # Get model params
             TDIR = SIM_options.SIMULATION_TDIR

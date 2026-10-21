@@ -1,12 +1,36 @@
-from OHSUPOPsimulations import SIM_options
-
+import sys
+import types
+from pathlib import Path
 import pickle
 import numpy as np
 import pandas as pd
+from OHSUPOPsimulations import SIM_options
+
+# Compatibility patch for pickles saved with older pandas versions (< 2.0)
+if 'pandas.core.indexes.numeric' not in sys.modules:
+    try:
+        import pandas.core.indexes.numeric
+    except ModuleNotFoundError:
+        import pandas.core.indexes.base
+        numeric_mod = types.ModuleType('pandas.core.indexes.numeric')
+        numeric_mod.Int64Index = pd.Index
+        numeric_mod.Float64Index = pd.Index
+        numeric_mod.UInt64Index = pd.Index
+        sys.modules['pandas.core.indexes.numeric'] = numeric_mod
+        setattr(pd.core.indexes.base, 'Int64Index', pd.Index)
+        setattr(pd.core.indexes.base, 'Float64Index', pd.Index)
+        setattr(pd.core.indexes.base, 'UInt64Index', pd.Index)
 
 
-def load_virtual_subjects(pkl_file):
-    vpop_data = pd.read_pickle(pkl_file)#pickle.load(file)
+def load_virtual_subjects(pkl_file="all_subject_t1dexi_pilot_06222023.pkl"):
+    # Fallback to local file if provided absolute path does not exist
+    path = Path(pkl_file)
+    if not path.exists():
+        repo_root = Path(__file__).resolve().parent.parent
+        local_path = repo_root / path.name
+        if local_path.exists():
+            path = local_path
+    vpop_data = pd.read_pickle(str(path))
 
     for ss in np.arange(len(vpop_data['subject'])):
         for arm in SIM_options.SIMULATION_SCENARIOS_ARMS:

@@ -46,4 +46,6 @@ Thumbs.db
 
 # Output simulation datasets / plots (if generated locally)
 sim_results/
+simulation_results/
 *.png
+
