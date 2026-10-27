@@ -55,6 +55,7 @@ desktop.ini
 # Output simulation datasets / plots (if generated locally)
 sim_results/
 simulation_results/
+test_pilot_results/
 *.png
 
 # Ensure the clinical pilot dataset is never ignored
