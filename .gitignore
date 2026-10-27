@@ -29,6 +29,7 @@ MANIFEST
 # Virtual environments
 .env
 .venv
+.venv/
 env/
 venv/
 ENV/
@@ -43,9 +44,18 @@ venv.bak/
 *~
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Testing & Linting caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
 
 # Output simulation datasets / plots (if generated locally)
 sim_results/
 simulation_results/
 *.png
 
+# Ensure the clinical pilot dataset is never ignored
+!all_subject_t1dexi_pilot_06222023.pkl

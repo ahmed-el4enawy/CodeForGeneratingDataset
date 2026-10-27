@@ -59,7 +59,7 @@ The simulator introduces 10 distinct clinical dosing problems across 4 daily tim
 ## 🚀 Setup & Installation
 
 ### 1. Prerequisites
-- Python 3.10 or 3.11 (Note: `pandas<2.0.0` is recommended for compatibility with older pickle format)
+- Python 3.10, 3.11, or 3.12+
 
 ### 2. Install Dependencies
 ```bash
