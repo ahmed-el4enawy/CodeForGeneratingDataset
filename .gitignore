@@ -56,7 +56,9 @@ desktop.ini
 sim_results/
 simulation_results/
 test_pilot_results/
+audit_results/
 *.png
+*.zip
 
 # Ensure the clinical pilot dataset is never ignored
 !all_subject_t1dexi_pilot_06222023.pkl
