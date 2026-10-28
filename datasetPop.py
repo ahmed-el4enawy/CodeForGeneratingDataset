@@ -2,9 +2,10 @@
 # Authors: Clara Mosquera-Lopez, Valentina Roquemen, Gavin Young, Navid Resalat, Peter Jacobs
 #          Oregon Health & Science University
 # File: datasetPop.py
-# Glucoregulatory Population Simulator - Paper-conforming dataset generator (Sec 2.2.1)
+# Glucoregulatory Population Simulator - Exact HPC Dataset (SIM002, SIM004, SIM005)
 # ---------------------------------------------
 
+import argparse
 import hashlib
 import multiprocessing
 from pathlib import Path
@@ -22,7 +23,8 @@ from correction_bolus import Correction_Ins_Alg
 
 def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, basalTDIRRatio, mealScenario,
                               ICR_problem, BASAL_problem, CF_problem, sub_idx, late_bolus_min, CF, problem,
-                              subject_id, meal_scenario_id, meal_day_ids_list,
+                              subject_id, meal_scenario_id, meal_day_ids_list, split_name,
+                              correction_bolus_enabled=False,
                               age=35, sex='UNK', initStates=None, Ts=5):
     """
     Simulate a single subject under a given scenario using pre-allocated NumPy arrays.
@@ -54,14 +56,14 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
         Q1 = initCGM / 18.0 * modParams[1]  # mg/dL to mmol/kg
         xmPlant[0] = Q1
 
-    # Pre-allocate simulation arrays (O(N) performance)
+    # Pre-allocate simulation arrays
     sim_day_arr = np.zeros(simTime, dtype=int)
     sim_hour_arr = np.zeros(simTime, dtype=int)
     input_insulin_arr = np.zeros(simTime, dtype=float)
     input_meal_carbs_arr = mealVector.copy().astype(float)
     output_glucose_arr = np.zeros(simTime, dtype=float)
     output_cgm_arr = np.zeros(simTime, dtype=float)
-    states_arr = np.zeros((simTime, 9), dtype=float)  # Q1..Q2, S1..S2, I, X1..X3, Ug
+    states_arr = np.zeros((simTime, 9), dtype=float)
     correction_bolus_arr = np.zeros(simTime, dtype=float)
 
     samples_per_day = (24 * 60) // Ts
@@ -76,7 +78,7 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
 
     time_corr = []
     corr_switch = 0
-    Bolus_C = 0.0  # Initialized to avoid NameError when correction boluses are disabled
+    Bolus_C = 0.0
 
     mePIU, mePGU, meHGP = 1, 1, 1
 
@@ -87,7 +89,7 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
         sim_hour_arr[t] = sim_hour_of_day
 
         # Optional correction bolus
-        if SIM_options.SIMULATION_CORRECTION_BOLUS:
+        if correction_bolus_enabled:
             Bolus_C, corr_switch, time_corr = Correction_Ins_Alg(
                 output_cgm_arr[:t], mealTime, t, SIM_options.SIMULATION_HIGH_TARGET,
                 time_corr, bodyWeight, corr_switch, CF, rescueTime, sim_hour_of_day,
@@ -170,7 +172,8 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
         'subject_id': str(subject_id),
         'meal_scenario': int(meal_scenario_id),
         'late_bolus_min': int(late_bolus_min),
-        'meal_day_ids': meal_day_ids_arr
+        'meal_day_ids': meal_day_ids_arr,
+        'data_split': split_name
     })
 
     return df, xmPlant
@@ -178,15 +181,12 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
 
 def simulate_scenarios(item):
     """
-    Run 7-day simulations for a given subject and bolus timing.
-    Saves one pickle file per meal_scenario x initCGM containing all 11 dosing cases (0..10).
+    Run 7-day simulations for a given scenario item.
     """
-    sub, subjectID, vp_data, modParamsOUT, body_weight, TDIR, basalTDIRRatio, this_sim_results_dir, late_bolus_min, cf = item
+    (sub, subjectID, vp_data, modParamsOUT, body_weight, TDIR, basalTDIRRatio,
+     target_split_dir, late_bolus_min, cf, split_name, corr_bolus_enabled) = item
 
-    if subjectID not in SIM_options.SIMULATION_SUBJECTS_INCLUDED:
-        return None
-
-    print(f"INFO: Processing virtual subject {subjectID} (delay: {late_bolus_min}m)")
+    print(f"INFO: Processing virtual subject {subjectID} ({split_name}, delay: {late_bolus_min}m)")
 
     age = vp_data['subject'][sub].get('age', 35)
     simDays = SIM_options.SIMULATION_N_DAYS_WEEKS * SIM_options.SIMULATION_N_WEEKS
@@ -197,7 +197,6 @@ def simulate_scenarios(item):
     )
 
     if len(meal_data_days) == 0:
-        print(f"WARN: No valid meal days for subject {subjectID}")
         return None
 
     n_meal_scenarios = SIM_options.SIMULATION_N_MEAL_SCENARIOS
@@ -208,11 +207,12 @@ def simulate_scenarios(item):
 
     initCGM_array, mu = SIM_load_virtualpop_data.get_initCGM(vp_data, sub)
     if len(initCGM_array) == 0:
-        print(f"WARN: Insufficient midnight CGM for subject {subjectID}")
         return None
 
+    target_dir = Path(target_split_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     for nsim, mealScenarioOUT in enumerate(mealScenarioOUT_array):
-        # Generate hash IDs for each of the 7 daily meal vectors in this scenario
         day_hashes = [
             hashlib.sha256(mealScenarioOUT[d * samples_per_day:(d + 1) * samples_per_day].tobytes()).hexdigest()[:12]
             for d in range(simDays)
@@ -231,8 +231,9 @@ def simulate_scenarios(item):
                     simDays, initCGM, modParamsOUT, body_weight,
                     TDIR, basalTDIRRatio, mealScenarioOUT,
                     ICR_problem, BASAL_problem, CF_problem, sub,
-                    late_bolus_min, cf, 0, subjectID, nsim, day_hashes,
-                    age, 'UNK'
+                    late_bolus_min, cf, 0, subjectID, nsim, day_hashes, split_name,
+                    correction_bolus_enabled=corr_bolus_enabled,
+                    age=age, sex='UNK'
                 )
                 dfs_dosing.append(df_0)
 
@@ -255,66 +256,112 @@ def simulate_scenarios(item):
                     simDays, initCGM, modParamsOUT, body_weight,
                     TDIR, basalTDIRRatio, mealScenarioOUT,
                     ICR_problem, BASAL_problem, CF_problem, sub,
-                    late_bolus_min, cf, problem, subjectID, nsim, day_hashes,
-                    age, 'UNK'
+                    late_bolus_min, cf, problem, subjectID, nsim, day_hashes, split_name,
+                    correction_bolus_enabled=corr_bolus_enabled,
+                    age=age, sex='UNK'
                 )
                 dfs_dosing.append(df_prob)
 
             if len(dfs_dosing) > 0:
                 df_sub_sim = pd.concat(dfs_dosing, ignore_index=True)
                 out_name = f"{subjectID}_mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl"
-                out_path = Path(this_sim_results_dir) / out_name
+                out_path = target_dir / out_name
                 df_sub_sim.to_pickle(str(out_path))
 
     return mu
 
 
-def main():
-    results_dir = SIM_options.SIMULATION_RESULTS_DIR
+def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=False):
+    """
+    Generate dataset(s) adhering exactly to the HPC dataset layout.
+    """
+    if dataset_ids is None:
+        dataset_ids = ['SIM002']
+    elif isinstance(dataset_ids, str):
+        dataset_ids = ['SIM002', 'SIM004', 'SIM005'] if dataset_ids.upper() == 'ALL' else [dataset_ids]
+
     vp_data = SIM_load_virtualpop_data.load_virtual_subjects(str(SIM_options.SIMULATION_VP_PKL))
+    results_base = SIM_options.SIMULATION_RESULTS_DIR
 
     TDIR = SIM_options.SIMULATION_TDIR
     basalTDIRRatio = SIM_options.SIMULATION_BASAL_TDIR_RATIO
     modParamsOUT = SIM_options.SIMULATION_POPULATION_PARAMS[:15]
     body_weight = SIM_options.SIMULATION_POPULATION_PARAMS[-1]
 
-    # Correction bolus CF loop only if enabled
-    if SIM_options.SIMULATION_CORRECTION_BOLUS:
-        cf_list = [35.0 * 0.8, 35.0, 35.0 * 1.2]
-    else:
-        cf_list = [35.0]
+    for sim_id in dataset_ids:
+        if sim_id not in SIM_options.HPC_DATASET_CONFIGS:
+            print(f"Unknown dataset ID: {sim_id}. Choose from SIM002, SIM004, SIM005, or ALL.")
+            continue
 
-    # Bolus delay timings (0 to 45 min in 5-min steps)
-    for late_bolus_min in SIM_options.SIMULATION_LATE_BOLUS_MIN:
-        for cf in cf_list:
-            if SIM_options.SIMULATION_CORRECTION_BOLUS:
-                subfolder = f"bolusCorrectionFactor_{int(cf)}_late_{late_bolus_min}min"
+        cfg = SIM_options.HPC_DATASET_CONFIGS[sim_id]
+        print("\n" + "=" * 70)
+        print(f"GENERATING DATASET: {sim_id} ({cfg['description']})")
+        print("=" * 70)
+
+        for scen in cfg['scenarios']:
+            folder = scen['folder']
+            delay = scen['delay']
+            use_splits = scen['use_splits']
+            subjects_mode = scen['subjects_mode']
+            corr_bolus = scen['correction_bolus']
+            cf = scen['cf']
+
+            # Target subjects for this scenario
+            if filter_subjects is not None:
+                target_subjects = [s.zfill(6) for s in filter_subjects]
+            elif subjects_mode == 'TRAIN_18':
+                target_subjects = SIM_options.SIMULATION_SUBJECTS_TRAIN
             else:
-                subfolder = f"boluslate_{late_bolus_min}min"
+                target_subjects = SIM_options.SIMULATION_SUBJECTS_INCLUDED
 
-            this_sim_results_dir = (
-                results_dir / SIM_options.SIMULATION_ID /
-                SIM_options.SIMULATION_TYPES[SIM_options.SIMULATION_TYPE_SELECTED] / subfolder
-            )
-            this_sim_results_dir.mkdir(parents=True, exist_ok=True)
-            print(f"\n---> Output Directory: {this_sim_results_dir}")
-
+            # Build items
             items = []
             for sub in range(len(vp_data['subject'])):
-                subjectID = str(vp_data['subject'][sub]['subjectID'])
-                if subjectID in SIM_options.SIMULATION_SUBJECTS_INCLUDED:
-                    items.append([
-                        sub, subjectID, vp_data, modParamsOUT, body_weight,
-                        TDIR, basalTDIRRatio, str(this_sim_results_dir), late_bolus_min, cf
-                    ])
+                sid = str(vp_data['subject'][sub]['subjectID']).zfill(6)
+                if sid not in target_subjects:
+                    continue
 
-            if SIM_options.SIMULATION_SERIAL:
-                for item in items:
-                    simulate_scenarios(item)
-            else:
+                if use_splits:
+                    if sid in SIM_options.SIMULATION_SUBJECTS_TRAIN:
+                        split_name = 'TRAIN'
+                    elif sid in SIM_options.SIMULATION_SUBJECTS_TEST:
+                        split_name = 'TEST'
+                    elif sid in SIM_options.SIMULATION_SUBJECTS_VALIDATION:
+                        split_name = 'VALIDATION'
+                    else:
+                        split_name = 'TRAIN'
+                else:
+                    split_name = 'TRAIN'
+
+                target_split_dir = results_base / sim_id / folder / split_name
+
+                items.append([
+                    sub, sid, vp_data, modParamsOUT, body_weight,
+                    TDIR, basalTDIRRatio, str(target_split_dir), delay, cf,
+                    split_name, corr_bolus
+                ])
+
+            print(f"\n---> {sim_id} / {folder} : {len(items)} subjects to simulate")
+
+            if parallel and len(items) > 1:
                 num_processes = min(multiprocessing.cpu_count(), len(items))
                 with multiprocessing.Pool(processes=num_processes) as pool:
                     pool.map(simulate_scenarios, items)
+            else:
+                for item in items:
+                    simulate_scenarios(item)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate dataset matching HPC structure (SIM002, SIM004, SIM005).")
+    parser.add_argument('--dataset', default='SIM002', choices=['SIM002', 'SIM004', 'SIM005', 'ALL'],
+                        help="Dataset ID to generate (default: SIM002). Use 'ALL' for full 5,010-file dataset.")
+    parser.add_argument('--subjects', default=None, help="Optional comma-separated list of subject IDs for test runs")
+    parser.add_argument('--parallel', action='store_true', help="Enable multi-process parallelism")
+    args = parser.parse_args()
+
+    filter_subs = [s.strip() for s in args.subjects.split(',')] if args.subjects else None
+    run_dataset_generation(dataset_ids=args.dataset, filter_subjects=filter_subs, parallel=args.parallel)
 
 
 if __name__ == '__main__':
