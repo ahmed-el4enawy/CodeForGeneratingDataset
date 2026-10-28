@@ -9,8 +9,13 @@ import argparse
 import hashlib
 import multiprocessing
 from pathlib import Path
+import random
 import numpy as np
 import pandas as pd
+
+# Original random seeds
+random.seed(0)
+np.random.seed(0)
 
 # OHSU simulator imports
 import OHSUPOPsimulations.create_SHP as createSH
@@ -205,14 +210,18 @@ def simulate_scenarios(item):
     )
     mealScenarioOUT_array = mealScenarioOUT_array.reshape(n_meal_scenarios, -1)
 
-    initCGM_array, mu = SIM_load_virtualpop_data.get_initCGM(vp_data, sub)
-    if len(initCGM_array) == 0:
-        return None
-
     target_dir = Path(target_split_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    mu_last = None
+
     for nsim, mealScenarioOUT in enumerate(mealScenarioOUT_array):
+        # In original OHSU generator, get_initCGM is called separately for each meal scenario
+        initCGM_array, mu = SIM_load_virtualpop_data.get_initCGM(vp_data, sub)
+        if len(initCGM_array) == 0:
+            continue
+        mu_last = mu
+
         day_hashes = [
             hashlib.sha256(mealScenarioOUT[d * samples_per_day:(d + 1) * samples_per_day].tobytes()).hexdigest()[:12]
             for d in range(simDays)
@@ -238,13 +247,14 @@ def simulate_scenarios(item):
                 dfs_dosing.append(df_0)
 
             # 2. Dosing problems 1 through 10
-            probmatrix = SIM_generate_dosing_problems.generate_problems_matrix(
-                SIM_options.SIMULATION_DOSING_PROBLEMS_DIC
-            )
-
             for problem in SIM_options.SIMULATION_DOSING_PROBLEMS_DIC.keys():
                 if problem not in SIM_options.SIMULATION_DOSING_PROBLEMS_SELECTED:
                     continue
+
+                # In original generator, generate_problems_matrix is called separately for each problem
+                probmatrix = SIM_generate_dosing_problems.generate_problems_matrix(
+                    SIM_options.SIMULATION_DOSING_PROBLEMS_DIC
+                )
 
                 BASAL_problem, ICR_problem_day, CF_problem_day = (
                     SIM_generate_dosing_problems.generate_sim_day_problems(problem, probmatrix)
@@ -264,14 +274,15 @@ def simulate_scenarios(item):
 
             if len(dfs_dosing) > 0:
                 df_sub_sim = pd.concat(dfs_dosing, ignore_index=True)
-                out_name = f"{subjectID}_mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl"
+                # Exact original filename format: {subjectID}mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl
+                out_name = f"{subjectID}mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl"
                 out_path = target_dir / out_name
                 df_sub_sim.to_pickle(str(out_path))
 
-    return mu
+    return mu_last
 
 
-def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=False):
+def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=False, output_base=None):
     """
     Generate dataset(s) adhering exactly to the HPC dataset layout.
     """
@@ -281,7 +292,7 @@ def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=Fals
         dataset_ids = ['SIM002', 'SIM004', 'SIM005'] if dataset_ids.upper() == 'ALL' else [dataset_ids]
 
     vp_data = SIM_load_virtualpop_data.load_virtual_subjects(str(SIM_options.SIMULATION_VP_PKL))
-    results_base = SIM_options.SIMULATION_RESULTS_DIR
+    results_base = Path(output_base) if output_base else SIM_options.SIMULATION_RESULTS_DIR
 
     TDIR = SIM_options.SIMULATION_TDIR
     basalTDIRRatio = SIM_options.SIMULATION_BASAL_TDIR_RATIO
@@ -357,11 +368,13 @@ def main():
     parser.add_argument('--dataset', default='SIM002', choices=['SIM002', 'SIM004', 'SIM005', 'ALL'],
                         help="Dataset ID to generate (default: SIM002). Use 'ALL' for full 5,010-file dataset.")
     parser.add_argument('--subjects', default=None, help="Optional comma-separated list of subject IDs for test runs")
+    parser.add_argument('--output-dir', default=None, help="Optional custom output directory base")
     parser.add_argument('--parallel', action='store_true', help="Enable multi-process parallelism")
     args = parser.parse_args()
 
     filter_subs = [s.strip() for s in args.subjects.split(',')] if args.subjects else None
-    run_dataset_generation(dataset_ids=args.dataset, filter_subjects=filter_subs, parallel=args.parallel)
+    run_dataset_generation(dataset_ids=args.dataset, filter_subjects=filter_subs,
+                           parallel=args.parallel, output_base=args.output_dir)
 
 
 if __name__ == '__main__':
