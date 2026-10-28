@@ -1,7 +1,6 @@
 import sys
 import types
 from pathlib import Path
-import pickle
 import numpy as np
 import pandas as pd
 from OHSUPOPsimulations import SIM_options
@@ -22,53 +21,62 @@ if 'pandas.core.indexes.numeric' not in sys.modules:
         setattr(pd.core.indexes.base, 'UInt64Index', pd.Index)
 
 
-def load_virtual_subjects(pkl_file="all_subject_t1dexi_pilot_06222023.pkl"):
-    # Fallback to local file if provided absolute path does not exist
+def load_virtual_subjects(pkl_file=None):
+    if pkl_file is None:
+        pkl_file = SIM_options.SIMULATION_VP_PKL
+
     path = Path(pkl_file)
     if not path.exists():
         repo_root = Path(__file__).resolve().parent.parent
         local_path = repo_root / path.name
         if local_path.exists():
             path = local_path
+        else:
+            raise FileNotFoundError(f"Virtual population file not found at: {path}")
+
     vpop_data = pd.read_pickle(str(path))
 
-    for ss in np.arange(len(vpop_data['subject'])):
+    for ss in range(len(vpop_data['subject'])):
         for arm in SIM_options.SIMULATION_SCENARIOS_ARMS:
-            vpop_data['subject'][ss][arm]['time'] = pd.to_datetime(vpop_data['subject'][ss][arm]['time_local']).dt.round(str(int(SIM_options.SIMULATION_TS_MINUTES)) + 'min')
-            vpop_data['subject'][ss][arm]['meals'] = vpop_data['subject'][ss][arm]['carbs_mean']
+            if arm in vpop_data['subject'][ss]:
+                vpop_data['subject'][ss][arm]['time'] = (
+                    pd.to_datetime(vpop_data['subject'][ss][arm]['time_local'])
+                    .dt.round(f"{int(SIM_options.SIMULATION_TS_MINUTES)}min")
+                )
+                vpop_data['subject'][ss][arm]['meals'] = vpop_data['subject'][ss][arm]['carbs_mean']
 
     print("INFO: Virtual population data loaded")
     return vpop_data
 
+
 def find_runs(x):
     """Find runs of consecutive items in an array."""
-
-    # ensure array
     x = np.asanyarray(x)
     if x.ndim != 1:
         raise ValueError('only 1D array supported')
     n = x.shape[0]
 
-    # handle empty array
     if n == 0:
         return np.array([]), np.array([]), np.array([])
 
-    else:
-        # find run starts
-        loc_run_start = np.empty(n, dtype=bool)
-        loc_run_start[0] = True
-        np.not_equal(x[:-1], x[1:], out=loc_run_start[1:])
-        run_starts = np.nonzero(loc_run_start)[0]
+    loc_run_start = np.empty(n, dtype=bool)
+    loc_run_start[0] = True
+    np.not_equal(x[:-1], x[1:], out=loc_run_start[1:])
+    run_starts = np.nonzero(loc_run_start)[0]
+    run_values = x[loc_run_start]
+    run_lengths = np.diff(np.append(run_starts, n))
 
-        # find run values
-        run_values = x[loc_run_start]
+    return run_values, run_starts, run_lengths
 
-        # find run lengths
-        run_lengths = np.diff(np.append(run_starts, n))
 
-        return run_values, run_starts, run_lengths
+def get_initCGM(vpop_data, subjectIDX, arm='df'):
+    """
+    Draw initial glucose values ~ N(mu, sigma) of midnight CGM readings.
+    Always returns a tuple (initcgm_array, mu).
+    """
+    if arm not in vpop_data['subject'][subjectIDX]:
+        return np.array([]), None
 
-def get_initCGM(vpop_data, subjectIDX, arm = 'df'):
     sub_cgm_data = vpop_data['subject'][subjectIDX][arm][['time', 'cgm']].copy()
     sub_cgm_data['hour_of_day'] = sub_cgm_data['time'].dt.hour
 
@@ -76,40 +84,56 @@ def get_initCGM(vpop_data, subjectIDX, arm = 'df'):
     rvalue_midnight, rstart_midnight, _ = find_runs(sub_cgm_data['hour_of_day'].values == 0)
     midnight_indices = rstart_midnight[rvalue_midnight == 1]
 
-    cgm_midnight = sub_cgm_data['cgm'].values[midnight_indices][np.logical_and(sub_cgm_data['cgm'].values[midnight_indices]>40,sub_cgm_data['cgm'].values[midnight_indices]<400)]
-    if len(cgm_midnight)<2:
-        return np.array([])
-    else:
-        #print(cgm_midnight)
-        # Get average CGM at 00:00
-        # print(sub_cgm_data['cgm'].values[midnight_indices])
-        if SIM_options.SIMULATION_N_CGM_INITIALIZATION==1:
-            return np.nanmean(cgm_midnight)#sub_cgm_data['cgm'].values[midnight_indices])
-        else:
+    if len(midnight_indices) == 0:
+        return np.array([]), None
 
-            mu = np.nanmean(cgm_midnight)#sub_cgm_data['cgm'].values[midnight_indices])
-            sigma = np.nanstd(cgm_midnight)#sub_cgm_data['cgm'].values[midnight_indices])
+    raw_midnight = sub_cgm_data['cgm'].values[midnight_indices]
+    valid_mask = np.logical_and(raw_midnight > 40, raw_midnight < 400)
+    cgm_midnight = raw_midnight[valid_mask]
 
-            initcgm =[]
-            i = 0
-            while i<SIM_options.SIMULATION_N_CGM_INITIALIZATION:
-                cgm = np.random.normal(mu, sigma, 1)
-                 # TODO: mu, sigmaprint()
-                if cgm>=40 and cgm<=400:
-                    if cgm[0] in initcgm:
-                        pass
-                    else:
-                        initcgm.append(cgm[0])
-                        i+=1
+    # Skip subjects with < 2 midnight readings
+    if len(cgm_midnight) < 2:
+        return np.array([]), None
 
-            return np.array(initcgm),mu
+    mu = float(np.nanmean(cgm_midnight))
+    sigma = float(np.nanstd(cgm_midnight))
+    if sigma < 1e-3:
+        sigma = 1.0
 
-def get_meal_scenario_days(vpop_data, subjectIDX, arms = SIM_options.SIMULATION_SCENARIOS_ARMS):
-    #TODO: Load scenarios, not meals
+    if SIM_options.SIMULATION_N_CGM_INITIALIZATION == 1:
+        return np.array([mu]), mu
+
+    initcgm = []
+    max_attempts = 1000
+    attempts = 0
+    while len(initcgm) < SIM_options.SIMULATION_N_CGM_INITIALIZATION and attempts < max_attempts:
+        attempts += 1
+        val = float(np.random.normal(mu, sigma))
+        if 40.0 <= val <= 400.0:
+            if not any(np.isclose(val, x, atol=1e-4) for x in initcgm):
+                initcgm.append(val)
+
+    # Fallback if sampling rejected too many points
+    while len(initcgm) < SIM_options.SIMULATION_N_CGM_INITIALIZATION:
+        val = float(np.clip(np.random.normal(mu, sigma), 40.0, 400.0))
+        initcgm.append(val)
+
+    return np.array(initcgm), mu
+
+
+def get_meal_scenario_days(vpop_data, subjectIDX, arms=SIM_options.SIMULATION_SCENARIOS_ARMS):
+    """
+    Extract valid 24-hour daily meal scenarios (filtered by count and amount).
+    Returns list of 1D arrays of shape (288,).
+    """
     sub_meal_data_days = []
+    samples_per_day = (24 * 60) // SIM_options.SIMULATION_TS_MINUTES  # 288
+
     for arm in arms:
-        # Load scenario meal data
-        sub_meal_data = vpop_data['subject'][subjectIDX][arm][['time','meals']].copy()
+        if arm not in vpop_data['subject'][subjectIDX]:
+            continue
+
+        sub_meal_data = vpop_data['subject'][subjectIDX][arm][['time', 'meals']].copy()
         sub_meal_data['hour_of_day'] = sub_meal_data['time'].dt.hour
 
         # Split at midnight 00:00
@@ -117,55 +141,52 @@ def get_meal_scenario_days(vpop_data, subjectIDX, arms = SIM_options.SIMULATION_
         midnight_indices = rstart_midnight[rvalue_midnight == 1]
         sub_meal_data_by_arm_and_day = np.split(sub_meal_data['meals'].values, midnight_indices)
 
-        # Pad first and last day with zeros if needed
+        for ii in range(len(sub_meal_data_by_arm_and_day)):
+            day_meals = sub_meal_data_by_arm_and_day[ii]
+            pad_width = samples_per_day - len(day_meals)
 
-        for ii in np.arange(len(sub_meal_data_by_arm_and_day)):
-            pad_width = ((24 * 60) // SIM_options.SIMULATION_TS_MINUTES) - len(sub_meal_data_by_arm_and_day[ii])
             if pad_width < 0:
-                sub_meal_data_by_arm_and_day[ii] = sub_meal_data_by_arm_and_day[ii][
-                                                   -((24 * 60) // SIM_options.SIMULATION_TS_MINUTES):]
-                continue
-            if (ii == 0) and (
-                    len(sub_meal_data_by_arm_and_day[ii]) < (24 * 60) // SIM_options.SIMULATION_TS_MINUTES):  # First
-                sub_meal_data_by_arm_and_day[ii] = np.pad(sub_meal_data_by_arm_and_day[ii], pad_width=(pad_width, 0),
-                                                          constant_values=0)
-            elif (ii == len(sub_meal_data_by_arm_and_day) - 1) and (
-                    len(sub_meal_data_by_arm_and_day[ii]) < (24 * 60) // SIM_options.SIMULATION_TS_MINUTES):
-                sub_meal_data_by_arm_and_day[ii] = np.pad(sub_meal_data_by_arm_and_day[ii], pad_width=(0, pad_width),
-                                                          constant_values=0)
-            else:
-                sub_meal_data_by_arm_and_day[ii] = np.pad(sub_meal_data_by_arm_and_day[ii],
-                                                          pad_width=(pad_width // 2, pad_width - (pad_width // 2)),
-                                                          constant_values=0)
-            # Filter real- meal scenarios
-            sub_meal_data_by_arm_and_day[ii] = np.nan_to_num(sub_meal_data_by_arm_and_day[ii],nan=0)
+                day_meals = day_meals[-samples_per_day:]
+            elif pad_width > 0:
+                if ii == 0:
+                    day_meals = np.pad(day_meals, (pad_width, 0), constant_values=0)
+                elif ii == len(sub_meal_data_by_arm_and_day) - 1:
+                    day_meals = np.pad(day_meals, (0, pad_width), constant_values=0)
+                else:
+                    day_meals = np.pad(day_meals, (pad_width // 2, pad_width - (pad_width // 2)), constant_values=0)
 
-            count = len(sub_meal_data_by_arm_and_day[ii][sub_meal_data_by_arm_and_day[ii]!=0])
-            amount = sub_meal_data_by_arm_and_day[ii].sum()
-            if count>=SIM_options.SIMULATION_count_min and count<=SIM_options.SIMULATION_count_max:
-                if amount>=SIM_options.SIMULATION_amount_min and amount<=SIM_options.SIMULATION_amount_max:
-                    #if not(((count<SIM_options.DS_count_min | count>SIM_options.DS_count_max) or
-                    #(amount<SIM_options.DS_amount_min |amount>SIM_options.DS_amount_max))):
-                    sub_meal_data_days.append(sub_meal_data_by_arm_and_day[ii])
+            day_meals = np.nan_to_num(day_meals, nan=0.0)
+            count = int(np.count_nonzero(day_meals != 0))
+            amount = float(np.sum(day_meals))
 
-        #sub_meal_data_days += sub_meal_data_by_arm_and_day
+            # Filter real meal scenarios per paper (1-9 meals, 30-359 g total carbs)
+            if SIM_options.SIMULATION_count_min <= count <= SIM_options.SIMULATION_count_max:
+                if SIM_options.SIMULATION_amount_min <= amount <= SIM_options.SIMULATION_amount_max:
+                    sub_meal_data_days.append(day_meals)
 
     return sub_meal_data_days
 
-def get_meal_scenario_simulation(meal_data_days, total_days, random_sample = True):
 
-    meal_data_days_concat = np.stack(meal_data_days, axis=0)
-    if len(meal_data_days) >= total_days:
+def get_meal_scenario_simulation(meal_data_days, total_days, random_sample=True):
+    """
+    Sample total_days from meal_data_days without replacement if sufficient,
+    otherwise with replacement directly from meal_data_days.
+    Returns:
+        meals_simulation: 1D array of shape (total_days * samples_per_day,)
+    """
+    meal_data_days_concat = np.stack(meal_data_days, axis=0)  # shape: (n_available, 288)
+    n_available = len(meal_data_days)
+
+    if n_available >= total_days:
         if random_sample:
-            meals_simulation = meal_data_days_concat[np.random.choice(np.arange(len(meal_data_days)), size=total_days, replace=False),:]
+            chosen = np.random.choice(n_available, size=total_days, replace=False)
         else:
-            meals_simulation = meal_data_days_concat[:total_days,:]
+            chosen = np.arange(total_days)
     else:
-        meal_data_days_resized = np.resize(np.asarray(meal_data_days_concat),new_shape=(total_days,meal_data_days_concat.shape[1]))
-        if random_sample: # Sample with replacement
-            meals_simulation = meal_data_days_resized[
-                np.random.choice(np.arange(len(meal_data_days_resized)), size=total_days, replace=True),:]
-        else: # Repeat until size
-            meals_simulation = meal_data_days_resized
+        if random_sample:
+            chosen = np.random.choice(n_available, size=total_days, replace=True)
+        else:
+            chosen = np.resize(np.arange(n_available), total_days)
 
+    meals_simulation = meal_data_days_concat[chosen, :]
     return meals_simulation.flatten()

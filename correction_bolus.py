@@ -1,118 +1,105 @@
 # ---------------------------------------------
 # Authors: Nichole Tyler (Original in Matlab), Valentina Roquemen (Translate to python),
 # Date: February 23, 2024
+# Updated for linear IOB & paper conformance
 # ---------------------------------------------
 
 import numpy as np
+from OHSUPOPsimulations import SIM_options
+
 
 def IOB_Linear_Calculation(IIR_mat):
+    """
+    Calculate Insulin On Board (IOB) using a 4-hour (48 sample @ 5-min) linear decay.
+    IIR_mat: insulin infusion rate in U/h (converted to U/sample by dividing by 12)
+             or bolus series. Can be a 1D slice of history (up to 48 samples) or longer.
+    """
+    arr = np.asarray(IIR_mat, dtype=float).flatten()
+    units_per_sample = arr / 12.0  # Convert U/h to Units per 5-min sample
+    li = len(units_per_sample)
+    if li == 0:
+        return 0.0
 
-    Ts = 5
-    IIR_mat = IIR_mat/12 # Convert to units / sample
-    bolusind = np.where(IIR_mat!=0)[0]
-    li = len(IIR_mat)
-
-    # Calculate Linear Component
     if li <= 48:
-        if  len(bolusind)>0:
-            decayvals = np.zeros((1,li))
-            timeval = li-bolusind # time since last bolus, up to 4 hrs.
-            decayval = (48-timeval)/48
-            decayvals[bolusind] = decayval
-            iobvals = decayvals*IIR_mat
-            IOB = np.sum(iobvals)
-        else:
-            IOB = 0
-
+        # Time since each bolus in samples: age in 1..li
+        ages = li - np.arange(li)
+        decay = np.maximum(0.0, (48.0 - ages) / 48.0)
+        return float(np.sum(units_per_sample * decay))
     else:
-        IOB = np.zeros((li,1))
-        for i in range(li):
-            tempiir = IIR_mat[(i-48):i]
-            ll = len(tempiir)
-            bolusind =  np.where(tempiir!=0)[0]
+        # Full time series calculation
+        kernel = (48.0 - np.arange(1, 49)) / 48.0
+        padded = np.pad(units_per_sample, (48, 0), mode='constant')
+        iob_series = np.convolve(padded, kernel, mode='valid')[:li]
+        return iob_series
 
-            if len(bolusind)>0:
-                decayvals = np.zeros(ll,1)
-                timeval = ll-bolusind # time since last bolus, up to 4 hrs.
-                decayval = (48-timeval)/48
-                decayvals[bolusind] = decayval
-                iobvals = decayvals*tempiir
-                tempiob = np.sum(iobvals)
-            else:
-                tempiob = 0
 
-            IOB[i] = tempiob
+def Correction_Ins_Alg(Output, meal_time, kk, high_target, time_corr, Weight, corr_switch, CF, time_resc, thour, u_bolus, cgm):
+    """
+    Checks for hyperglycemia and calculates smart correction bolus using IOB and trend.
+    Output: CGM history list/array in mg/dL
+    kk: current sample index
+    high_target: target glucose (mg/dL)
+    Weight: subject body weight (kg)
+    corr_switch: cooldown switch
+    CF: correction factor
+    """
+    if kk <= 0:
+        return 0.0, 0, time_corr
 
-    return IOB
-
-# This code checks for hyperglycemia and adds a correction bolus
-# is your BG > 280, are you 1 hr out from a meal, and have you not given a
-# correction in the past 4 hrs?
-
-# Output= CGM in mg/dL
-# kk: index time
-# thour: Hour of the day
-# corr_switch: 0,1
-# CF = 35, 35*0.8, 35*1.2
-def Correction_Ins_Alg(Output,meal_time,kk,high_target,time_corr,Weight,corr_switch,CF, time_resc,thour,u_bolus,cgm):
-    if kk>0: # -1 matlab
-        # Correction 4 hours after a meal
-        if thour > 21 or thour < 7:
-            thr_corr = 280
-        else:
-            thr_corr = 200
-
-        # Test 1
-        if (corr_switch == 0) and (Output[kk-1] > thr_corr) and len(meal_time)>0 and ((kk-meal_time[-1])>=48):
-
-            uiob = u_bolus[kk-48:kk]
-            IOB_vals= IOB_Linear_Calculation(uiob*Weight*60/1000) # feed in U/hr calculation
-
-            DEval =np.sum(np.diff(cgm[kk-14:kk-1]))/(5*12)
-
-            # CALCULATE INSULIN BOLUS using smart bolus calculator
-            if (DEval > 3):
-                CFval = (Output[kk-1] + 100 - high_target)/(CF) - IOB_vals
-            elif (DEval > 2) and (DEval <= 3):
-                CFval = (Output[kk-1] + 75 - high_target)/(CF) - IOB_vals
-            elif (DEval > 1) and (DEval <= 2):
-                CFval = (Output[kk-1] + 50 - high_target)/(CF) - IOB_vals
-            elif (DEval < -1) and (DEval >= -2):
-                CFval = (Output[kk-1] - 50 - high_target)/(CF) - IOB_vals
-            elif (DEval < -2) and (DEval >= -3):
-                CFval = (Output[kk-1] - 75 - high_target)/(CF) - IOB_vals
-            elif (DEval < -3):
-                CFval = (Output[kk-1] - 100 - high_target)/(CF) - IOB_vals
-            else:
-                CFval = (Output[kk-1] - high_target)/(CF) - IOB_vals
-
-            if CFval <0:
-                CFval = 0
-
-            Bolus_C = CFval*1000/(Weight*5) #(mU/kg/min)
-            # dont correct if the person had a rescue in the last hour.
-            if len(time_resc)>0 and ((kk-time_resc[-1])<12):
-                Bolus_C = 0
-
-            # If the subject is sleeping they probably won't take the bolus. Remove the condition because we want to maximize the examples
-            #if thour > 21 or thour < 7:
-            #    if np.random.randint(2) < 0.50:
-            #        Bolus_C = 0
-
-            if Bolus_C > 0:
-                time_corr.append(kk)
-                corr_switch = 1
-
-        else:
-            Bolus_C = 0
-
-        # Test 2
-        # 3 Hours between correction boluses
-        if  (len(time_corr)>0) and ((kk-time_corr[-1]) > 36):
-           corr_switch = 0
-
+    # Daytime vs Nighttime correction threshold
+    if thour > 21 or thour < 7:
+        thr_corr = 280.0
     else:
-        Bolus_C = 0
+        thr_corr = float(getattr(SIM_options, 'SIMULATION_GLUCOSE_THRESHOLD_CORRECTION_BOLUS', 200.0))
+
+    prev_cgm = Output[kk - 1]
+    Bolus_C = 0.0
+
+    # Test 1: Check threshold, post-meal delay (>= 4 hours), and switch
+    if (corr_switch == 0) and (prev_cgm > thr_corr) and len(meal_time) > 0 and ((kk - meal_time[-1]) >= 48):
+        uiob = u_bolus[max(0, kk - 48):kk]
+        iob_vals = IOB_Linear_Calculation(uiob * Weight * 60.0 / 1000.0)
+
+        # Rate of change over past ~1 hour
+        start_trend = max(0, kk - 14)
+        cgm_trend_slice = cgm[start_trend:kk]
+        if len(cgm_trend_slice) > 1:
+            de_val = float(np.sum(np.diff(cgm_trend_slice)) / (5.0 * 12.0))
+        else:
+            de_val = 0.0
+
+        # Trend-offset adjustment
+        if de_val > 3.0:
+            offset = 100.0
+        elif de_val > 2.0:
+            offset = 75.0
+        elif de_val > 1.0:
+            offset = 50.0
+        elif de_val < -3.0:
+            offset = -100.0
+        elif de_val < -2.0:
+            offset = -75.0
+        elif de_val < -1.0:
+            offset = -50.0
+        else:
+            offset = 0.0
+
+        cf_val = (prev_cgm + offset - high_target) / CF - iob_vals
+        if cf_val < 0.0:
+            cf_val = 0.0
+
+        Bolus_C = cf_val * 1000.0 / (Weight * 5.0)  # in mU/kg/min
+
+        # Don't correct if rescue carbs administered in the last hour (12 samples)
+        if len(time_resc) > 0 and ((kk - time_resc[-1]) < 12):
+            Bolus_C = 0.0
+
+        if Bolus_C > 0.0:
+            time_corr.append(kk)
+            corr_switch = 1
+
+    # Test 2: Reset switch after 3 hours (36 samples) between correction boluses
+    if len(time_corr) > 0 and ((kk - time_corr[-1]) > 36):
         corr_switch = 0
 
     return Bolus_C, corr_switch, time_corr
