@@ -30,7 +30,8 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
                               ICR_problem, BASAL_problem, CF_problem, sub_idx, late_bolus_min, CF, problem,
                               subject_id, meal_scenario_id, meal_day_ids_list, split_name,
                               correction_bolus_enabled=False,
-                              age=35, sex='UNK', initStates=None, Ts=5):
+                              age=35, sex='UNK', initStates=None, Ts=5,
+                              include_metadata=False):
     """
     Simulate a single subject under a given scenario using pre-allocated NumPy arrays.
     """
@@ -154,7 +155,7 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
     if len(valid_rescues) > 0:
         input_meal_carbs_arr[valid_rescues] += 20.0
 
-    df = pd.DataFrame({
+    df_data = {
         'time': np.arange(simTime),
         'dosing_problem_id': int(problem),
         'sim_day': sim_day_arr,
@@ -173,13 +174,23 @@ def OHSU_SIM_simulate_subject(simDays, initCGM, modParams0, bodyWeight, TDIR, ba
         'state_X2': states_arr[:, 6],
         'state_X3': states_arr[:, 7],
         'state_Ug': states_arr[:, 8],
-        'correction_bolus': correction_bolus_arr,
-        'subject_id': str(subject_id),
-        'meal_scenario': int(meal_scenario_id),
-        'late_bolus_min': int(late_bolus_min),
-        'meal_day_ids': meal_day_ids_arr,
-        'data_split': split_name
-    })
+    }
+
+    # Exactly match Valentina's HPC dataset: correction_bolus only in SIM005
+    if correction_bolus_enabled:
+        df_data['correction_bolus'] = correction_bolus_arr
+
+    # Additional metadata columns when requested
+    if include_metadata:
+        df_data.update({
+            'subject_id': str(subject_id),
+            'meal_scenario': int(meal_scenario_id),
+            'late_bolus_min': int(late_bolus_min),
+            'meal_day_ids': meal_day_ids_arr,
+            'data_split': split_name
+        })
+
+    df = pd.DataFrame(df_data)
 
     return df, xmPlant
 
@@ -189,7 +200,12 @@ def simulate_scenarios(item):
     Run 7-day simulations for a given scenario item.
     """
     (sub, subjectID, vp_data, modParamsOUT, body_weight, TDIR, basalTDIRRatio,
-     target_split_dir, late_bolus_min, cf, split_name, corr_bolus_enabled) = item
+     target_split_dir, late_bolus_min, cf, split_name, corr_bolus_enabled,
+     seed_mode, include_metadata) = item
+
+    if seed_mode == 'subject':
+        random.seed(0)
+        np.random.seed(0)
 
     print(f"INFO: Processing virtual subject {subjectID} ({split_name}, delay: {late_bolus_min}m)")
 
@@ -242,7 +258,7 @@ def simulate_scenarios(item):
                     ICR_problem, BASAL_problem, CF_problem, sub,
                     late_bolus_min, cf, 0, subjectID, nsim, day_hashes, split_name,
                     correction_bolus_enabled=corr_bolus_enabled,
-                    age=age, sex='UNK'
+                    age=age, sex='UNK', include_metadata=include_metadata
                 )
                 dfs_dosing.append(df_0)
 
@@ -268,7 +284,7 @@ def simulate_scenarios(item):
                     ICR_problem, BASAL_problem, CF_problem, sub,
                     late_bolus_min, cf, problem, subjectID, nsim, day_hashes, split_name,
                     correction_bolus_enabled=corr_bolus_enabled,
-                    age=age, sex='UNK'
+                    age=age, sex='UNK', include_metadata=include_metadata
                 )
                 dfs_dosing.append(df_prob)
 
@@ -283,7 +299,8 @@ def simulate_scenarios(item):
     return mu_last
 
 
-def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=False, output_base=None):
+def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=False,
+                           output_base=None, seed_mode='scenario', include_metadata=False):
     """
     Generate dataset(s) adhering exactly to the HPC dataset layout.
     """
@@ -357,7 +374,7 @@ def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=Fals
                 items.append([
                     sub, sid, vp_data, modParamsOUT, body_weight,
                     TDIR, basalTDIRRatio, str(target_split_dir), delay, cf,
-                    split_name, corr_bolus
+                    split_name, corr_bolus, seed_mode, include_metadata
                 ])
 
             print(f"\n---> {sim_id} / {folder} : {len(items)} subjects to simulate")
@@ -377,12 +394,17 @@ def main():
                         help="Dataset ID to generate (default: SIM002). Use 'ALL' for full 5,010-file dataset.")
     parser.add_argument('--subjects', default=None, help="Optional comma-separated list of subject IDs for test runs")
     parser.add_argument('--output-dir', default=None, help="Optional custom output directory base")
+    parser.add_argument('--seed-mode', default='scenario', choices=['scenario', 'subject'],
+                        help="Seed reset policy: 'scenario' (HPC sequential default) or 'subject' (per-subject isolation)")
+    parser.add_argument('--include-metadata', action='store_true',
+                        help="Include additional metadata columns (subject_id, meal_scenario, etc.). Default matches pure HPC schema.")
     parser.add_argument('--parallel', action='store_true', help="Enable multi-process parallelism")
     args = parser.parse_args()
 
     filter_subs = [s.strip() for s in args.subjects.split(',')] if args.subjects else None
     run_dataset_generation(dataset_ids=args.dataset, filter_subjects=filter_subs,
-                           parallel=args.parallel, output_base=args.output_dir)
+                           parallel=args.parallel, output_base=args.output_dir,
+                           seed_mode=args.seed_mode, include_metadata=args.include_metadata)
 
 
 if __name__ == '__main__':
