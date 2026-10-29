@@ -55,6 +55,8 @@ desktop.ini
 # Output simulation datasets / plots (if generated locally)
 sim_results/
 simulation_results/
+experimental_results/
+reference_comparison/
 test_pilot_results/
 audit_results/
 *.png
