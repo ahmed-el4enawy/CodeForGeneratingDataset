@@ -274,8 +274,9 @@ def simulate_scenarios(item):
 
             if len(dfs_dosing) > 0:
                 df_sub_sim = pd.concat(dfs_dosing, ignore_index=True)
-                # Exact original filename format: {subjectID}mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl
-                out_name = f"{subjectID}mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl"
+                # HPC filename prefix: S_ for SIM002/SIM004, no prefix for SIM005
+                prefix = "S_" if any(k in str(target_split_dir) for k in ['SIM002', 'SIM004']) else ""
+                out_name = f"{prefix}{subjectID}mealScenario_{nsim}_initCGM_{ii}_{int(initCGM)}.pkl"
                 out_path = target_dir / out_name
                 df_sub_sim.to_pickle(str(out_path))
 
@@ -299,6 +300,9 @@ def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=Fals
     modParamsOUT = SIM_options.SIMULATION_POPULATION_PARAMS[:15]
     body_weight = SIM_options.SIMULATION_POPULATION_PARAMS[-1]
 
+    # Map subject ID string to vp_data index
+    sid_to_sub = {str(vp_data['subject'][s]['subjectID']).zfill(6): s for s in range(len(vp_data['subject']))}
+
     for sim_id in dataset_ids:
         if sim_id not in SIM_options.HPC_DATASET_CONFIGS:
             print(f"Unknown dataset ID: {sim_id}. Choose from SIM002, SIM004, SIM005, or ALL.")
@@ -310,6 +314,10 @@ def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=Fals
         print("=" * 70)
 
         for scen in cfg['scenarios']:
+            # Reseed per scenario to replicate standalone HPC simulation script executions
+            random.seed(0)
+            np.random.seed(0)
+
             folder = scen['folder']
             delay = scen['delay']
             use_splits = scen['use_splits']
@@ -317,7 +325,7 @@ def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=Fals
             corr_bolus = scen['correction_bolus']
             cf = scen['cf']
 
-            # Target subjects for this scenario
+            # Target subjects for this scenario (maintaining exact author list order)
             if filter_subjects is not None:
                 target_subjects = [s.zfill(6) for s in filter_subjects]
             elif subjects_mode == 'TRAIN_18':
@@ -325,12 +333,12 @@ def run_dataset_generation(dataset_ids=None, filter_subjects=None, parallel=Fals
             else:
                 target_subjects = SIM_options.SIMULATION_SUBJECTS_INCLUDED
 
-            # Build items
+            # Build items in exact author target_subjects sequence
             items = []
-            for sub in range(len(vp_data['subject'])):
-                sid = str(vp_data['subject'][sub]['subjectID']).zfill(6)
-                if sid not in target_subjects:
+            for sid in target_subjects:
+                if sid not in sid_to_sub:
                     continue
+                sub = sid_to_sub[sid]
 
                 if use_splits:
                     if sid in SIM_options.SIMULATION_SUBJECTS_TRAIN:
