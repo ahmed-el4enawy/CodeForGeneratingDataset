@@ -8,6 +8,7 @@
 # ---------------------------------------------
 
 import sys
+import shutil
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -30,7 +31,6 @@ def extract_meal_day_indices(ref_meals_p0, available_meal_days, samples_per_day=
                 matched_idx = m_i
                 break
         if matched_idx is None:
-            # Fallback to zero diff or closest
             diffs = [np.sum(np.abs(day_slice - m_day)) for m_day in available_meal_days]
             matched_idx = int(np.argmin(diffs))
         matched_indices.append(matched_idx)
@@ -38,14 +38,19 @@ def extract_meal_day_indices(ref_meals_p0, available_meal_days, samples_per_day=
 
 
 def verify_benchmark_test(test_id, test_name, ref_dir, glob_pattern, vp_data, sub_map,
-                          delay_min=0, cf=35.0, corr_bolus=False):
+                          output_dir, delay_min=0, cf=35.0, corr_bolus=False):
     """
-    Verify all reference files for a specific test against the simulation engine.
+    Verify all reference files for a specific test against the simulation engine,
+    saving generated .pkl files to output_dir.
     """
     print("\n" + "=" * 80)
     print(f"BENCHMARK {test_id}: {test_name}")
     print(f"Reference Directory: {ref_dir}")
+    print(f"Output Directory:    {output_dir}")
     print("=" * 80)
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     ref_files = sorted(list(Path(ref_dir).glob(glob_pattern)))
     if not ref_files:
@@ -62,14 +67,12 @@ def verify_benchmark_test(test_id, test_name, ref_dir, glob_pattern, vp_data, su
     passed = 0
     total = len(ref_files)
 
-    # Cache for meal scenarios per (subjectID, meal_scenario_id)
     scenario_meal_cache = {}
 
     for ref_file in ref_files:
         df_ref = pd.read_pickle(ref_file)
         fname = ref_file.name
 
-        # Parse subject ID and scenario ID from filename
         clean_name = fname[2:] if fname.startswith("S_") else fname
         parts = clean_name.split("mealScenario_")
         sid = parts[0]
@@ -111,12 +114,10 @@ def verify_benchmark_test(test_id, test_name, ref_dir, glob_pattern, vp_data, su
         mae_glc = np.mean(np.abs(df_gen_0['output_glucose'].values - df_ref_p0['output_glucose'].values))
         mae_ins = np.mean(np.abs(df_gen_0['input_insulin'].values - df_ref_p0['input_insulin'].values))
 
-        # Check correction bolus if enabled
         mae_cb = 0.0
         if corr_bolus and 'correction_bolus' in df_ref_p0:
             mae_cb = np.mean(np.abs(df_gen_0['correction_bolus'].values - df_ref_p0['correction_bolus'].values))
 
-        # Check schema match
         schema_match = (len(df_gen_0.columns) == len(df_ref_p0.columns))
 
         is_pass = (mae_glc < 1e-10) and (mae_ins < 1e-10) and (mae_cb < 1e-10) and schema_match
@@ -126,6 +127,9 @@ def verify_benchmark_test(test_id, test_name, ref_dir, glob_pattern, vp_data, su
         else:
             status = "FAIL"
 
+        # Save verified file to output directory
+        df_gen_0.to_pickle(str(output_path / fname))
+
         print(f"[{status}] {fname:<45} | MAE Glc: {mae_glc:.2e} | MAE Ins: {mae_ins:.2e} | Schema: {schema_match}")
 
     print("-" * 80)
@@ -134,6 +138,12 @@ def verify_benchmark_test(test_id, test_name, ref_dir, glob_pattern, vp_data, su
 
 
 def main():
+    # Remove any old generated test directory
+    out_base = Path("experimental_results/benchmark_reproduction")
+    if out_base.exists():
+        shutil.rmtree(out_base, ignore_errors=True)
+    out_base.mkdir(parents=True, exist_ok=True)
+
     vp_data = SIM_load_virtualpop_data.load_virtual_subjects(str(SIM_options.SIMULATION_VP_PKL))
     sub_map = {str(s['subjectID']).zfill(6): i for i, s in enumerate(vp_data['subject'])}
 
@@ -143,7 +153,9 @@ def main():
     p1, t1 = verify_benchmark_test(
         "1", "SIM002 Base Simulation (Subject 001003)",
         "reference_comparison/valentina/SIM002/TRAIN", "S_001003*.pkl",
-        vp_data, sub_map, delay_min=0, cf=35.0, corr_bolus=False
+        vp_data, sub_map,
+        output_dir=out_base / "SIM002/POPULATION/TRAIN",
+        delay_min=0, cf=35.0, corr_bolus=False
     )
     results.append(("SIM002 Subject 001003", p1, t1))
 
@@ -151,7 +163,9 @@ def main():
     p2, t2 = verify_benchmark_test(
         "2", "SIM004 Late Bolus 5 min (Subject 001003)",
         "reference_comparison/valentina/SIM004/boluslate_5min/TRAIN", "S_001003*.pkl",
-        vp_data, sub_map, delay_min=5, cf=35.0, corr_bolus=False
+        vp_data, sub_map,
+        output_dir=out_base / "SIM004/boluslate_5min/TRAIN",
+        delay_min=5, cf=35.0, corr_bolus=False
     )
     results.append(("SIM004 Late Bolus 5min (001003)", p2, t2))
 
@@ -159,7 +173,9 @@ def main():
     p3, t3 = verify_benchmark_test(
         "3", "SIM002 Base Simulation (Subject 001004)",
         "reference_comparison/valentina/SIM002/TRAIN", "S_001004*.pkl",
-        vp_data, sub_map, delay_min=0, cf=35.0, corr_bolus=False
+        vp_data, sub_map,
+        output_dir=out_base / "SIM002/POPULATION/TRAIN",
+        delay_min=0, cf=35.0, corr_bolus=False
     )
     results.append(("SIM002 Subject 001004", p3, t3))
 
@@ -167,7 +183,9 @@ def main():
     p4, t4 = verify_benchmark_test(
         "4", "SIM005 Correction Bolus CF 28 (Subject 001003)",
         "reference_comparison/valentina/SIM005/bolusCorrectionFactor_28/TRAIN", "*001003*.pkl",
-        vp_data, sub_map, delay_min=0, cf=28.0, corr_bolus=True
+        vp_data, sub_map,
+        output_dir=out_base / "SIM005/bolusCorrectionFactor_28/TRAIN",
+        delay_min=0, cf=28.0, corr_bolus=True
     )
     results.append(("SIM005 Correction Bolus CF 28 (001003)", p4, t4))
 
@@ -185,6 +203,7 @@ def main():
 
     if total_passed == total_files:
         print("\n>>> ALL 4 BENCHMARK TESTS PASSED WITH 100% EXACT FLOATING POINT EQUIVALENCE! <<<")
+        print(f"All 60 verified benchmark files have been freshly written to: {out_base.resolve()}\n")
         return 0
     else:
         print(f"\n>>> FAILED: {total_files - total_passed} files did not pass. <<<")
